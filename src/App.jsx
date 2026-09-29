@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Sparkles, Wand2, Search, FlaskConical, Gem, Archive, Award, Star, ArrowRight, RotateCcw, BookOpen, LayoutGrid, PenTool, ScrollText, Coins, Crown, Users, Maximize2, MinusCircle, Shield, Flame, HelpCircle, Lock, Feather, Settings, Unlock, RefreshCw, Key, Copy, Check } from 'lucide-react';
+import React, { useState, useEffect, useRef, createContext, useContext, useCallback, useMemo } from 'react';
+import { Sparkles, Wand2, Search, FlaskConical, Gem, Archive, Award, Star, ArrowRight, RotateCcw, BookOpen, LayoutGrid, PenTool, ScrollText, Coins, Crown, Users, Maximize2, MinusCircle, Shield, Flame, HelpCircle, Lock, Feather, Settings, Unlock, RefreshCw, Key, Copy, Check, Target } from 'lucide-react';
 
 // ==========================================
 // CUSTOM CSS FÜR MAGISCHE THEMEN & ANIMATIONEN
@@ -838,7 +838,7 @@ function AdminAuthModal({ onLogin, onClose, onImpressum }) {
   );
 }
 
-function AdminControlModal({ onClose, setGameProgress, setGlobalScore }) {
+function AdminControlModal({ onClose, setGameProgress, setGlobalScore, setSkillLog }) {
   
   const handleUnlockBasics = () => {
     const updates = {
@@ -865,6 +865,7 @@ function AdminControlModal({ onClose, setGameProgress, setGlobalScore }) {
     if (window.confirm("Wirklich den gesamten Fortschritt löschen?")) {
       setGameProgress({});
       setGlobalScore(0);
+      setSkillLog({});
     }
   };
 
@@ -908,7 +909,240 @@ function AdminControlModal({ onClose, setGameProgress, setGlobalScore }) {
   );
 }
 
-function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore }) {
+
+// ==========================================
+// „DAS KANN ICH SCHON“: Können-Bausteine & Einstufung
+// ==========================================
+// Die Spiele melden Ergebnisse über diesen Context an die App.
+// Grundregel: Es zählt nur der erste Versuch pro Aufgabe.
+const SkillContext = createContext({ track: () => {} });
+const useTrack = () => useContext(SkillContext).track;
+
+// ACHTUNG: Reihenfolge ist Teil des Zauber-Codes – nie umsortieren! Neue Bausteine brauchen ein neues Code-Format.
+const SKILLS = [
+  { id: 'finden', title: 'Pronomen im Text finden', rule: 'Pronomen sind kurze Stellvertreter-Wörter: ich, du, er, mein, uns …' },
+  { id: 'ersetzen', title: 'Pronomen ersetzen Nomen', rule: 'der Drache → er, die Hexe → sie, das Einhorn → es, die Zwerge → sie' },
+  { id: 'einsetzen', title: 'Das passende Pronomen einsetzen', rule: 'Wer tut etwas (er, sie)? Wem gehört etwas (sein, ihr)?' },
+  { id: 'art', title: 'Personal- oder Possessivpronomen', rule: 'ich, du, er … stehen für Personen. mein, dein, sein … zeigen, wem etwas gehört.' },
+  { id: 'person', title: 'Person und Zahl', rule: '1. Person: ich/wir · 2. Person: du/ihr · 3. Person: er, sie, es/sie' },
+  { id: 'hoeflich', title: 'Höflichkeitsform', rule: 'Wen du siezt, sprichst du groß an: Sie, Ihnen, Ihr.' }
+];
+
+// Welche Bausteine in welcher Übung trainiert werden
+const GAME_SKILLS = {
+  luecken: ['einsetzen'],
+  suchen: ['finden'],
+  paare: ['ersetzen'],
+  wahrfalsch: ['einsetzen'],
+  sortieren: ['art'],
+  raster: ['person'],
+  tippen: ['ersetzen'],
+  schriftrolle: ['einsetzen'],
+  feder: ['einsetzen'],
+  formal: ['hoeflich'],
+  gates: ['hoeflich']
+};
+
+// Titel und Symbol der Übungen (für die Anzeige in „Das kann ich schon:“)
+const GAME_INFO = {
+  luecken: { title: 'Zaubersprüche', icon: Wand2 },
+  suchen: { title: 'Verborgene Runen', icon: Search },
+  paare: { title: 'Hexenkessel', icon: FlaskConical },
+  wahrfalsch: { title: 'Kristall der Wahrheit', icon: Gem },
+  sortieren: { title: 'Schatztruhen', icon: Archive },
+  raster: { title: 'Raster der Weisen', icon: LayoutGrid },
+  tippen: { title: 'Verwandlungszauber', icon: PenTool },
+  schriftrolle: { title: 'Die Schriftrolle', icon: ScrollText },
+  feder: { title: 'Feder & Tinte', icon: Feather },
+  formal: { title: 'Der Höflichkeits-Zauber', icon: Maximize2 },
+  gates: { title: 'Die Schlosstore', icon: Shield }
+};
+
+// Übungen, die einen Baustein trainieren und für die Auswertung zählen
+const gamesForSkill = (skillId) => GAME_ORDER.filter(id =>
+  (GAME_SKILLS[id] || []).includes(skillId)
+);
+
+// Stufe 0–3 aus den letzten bis zu 10 Ergebnissen eines Bausteins:
+// unter 4 Ergebnisse → 0; ab 90 % → 3 „Kann ich!“; ab 70 % → 2 „Fast!“; sonst → 1 „Übe ich noch“.
+const skillLevel = (entry) => {
+  const win = entry?.window || [];
+  if (win.length < 4) return 0;
+  const quote = win.filter(Boolean).length / win.length;
+  if (quote >= 0.9) return 3;
+  if (quote >= 0.7) return 2;
+  return 1;
+};
+
+const SKILL_LEVEL_UI = {
+  3: { label: '💪 Kann ich!', cls: 'bg-lime-400/20 text-lime-300 border-lime-400/60' },
+  2: { label: '🙂 Fast!', cls: 'bg-yellow-400/20 text-yellow-300 border-yellow-400/60' },
+  1: { label: '🎯 Übe ich noch', cls: 'bg-pink-400/20 text-pink-300 border-pink-400/60' },
+  0: { label: '🔍 Noch zu wenig Aufgaben', cls: 'bg-slate-700/40 text-slate-400 border-slate-600' }
+};
+
+// Startwerte, wenn eine Stufe aus dem Code geladen wird (echte Zählung bleibt 0)
+const START_WINDOWS = { 3: [true, true, true, true], 2: [true, true, true, false], 1: [true, false, false, false], 0: [] };
+const skillLogFromLevels = (levels) => {
+  const log = {};
+  SKILLS.forEach(s => {
+    const lvl = levels[s.id] || 0;
+    if (lvl > 0) log[s.id] = { window: [...START_WINDOWS[lvl]], ok: 0, total: 0 };
+  });
+  return log;
+};
+const skillLevelsOf = (skillLog) => {
+  const levels = {};
+  SKILLS.forEach(s => { levels[s.id] = skillLevel(skillLog[s.id]); });
+  return levels;
+};
+
+// „Das kann ich schon“: Übersicht, welche Regeln schon sicher sitzen.
+// focusGame gesetzt  → nur die Bausteine dieser Übung (Knopf in der Übung / auf dem Ergebnis-Bildschirm)
+// focusGame = null   → alle Bausteine mit den Übungen, in denen sie trainiert werden (Knopf oben in der Leiste)
+function SkillModal({ onClose, skillLog, focusGame, getLockState, gameProgress, onStartGame }) {
+  const shownSkills = focusGame ? SKILLS.filter(s => (GAME_SKILLS[focusGame] || []).includes(s.id)) : SKILLS;
+  const nothingYet = shownSkills.every(s => !(skillLog[s.id]?.window?.length));
+
+  // Empfohlene Übung: erste freigeschaltete – in einer Übung nie die, in der man gerade ist
+  const practiceGame = (skillId) => gamesForSkill(skillId).find(id => id !== focusGame && !getLockState(id));
+
+  const SkillRow = ({ skill }) => {
+    const entry = skillLog[skill.id];
+    const level = skillLevel(entry);
+    const ui = SKILL_LEVEL_UI[level];
+    const practice = (level === 1 || level === 2) ? practiceGame(skill.id) : null;
+    let stats = null;
+    if (entry?.total > 0) stats = `Heute: ${entry.ok} von ${entry.total} beim ersten Versuch richtig`;
+    else if (entry?.window?.length > 0) stats = 'Aus dem Zauber-Code übernommen';
+    return (
+      <div className="bg-emerald-950/50 border-emerald-700/40 p-4 rounded-2xl border-2 flex flex-col gap-3">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="flex-1 text-left">
+            <h4 className="font-black text-slate-100 text-lg leading-tight">{skill.title}</h4>
+            <p className="text-slate-300 text-base mt-1">{skill.rule}</p>
+            {practice && focusGame && <p className="text-amber-200 text-sm font-bold mt-1">Übe auch in: {GAME_INFO[practice].title}</p>}
+            {stats && <p className="text-slate-500 text-xs mt-1">{stats}</p>}
+          </div>
+          <span className={`self-start sm:self-center whitespace-nowrap font-black text-sm px-3 py-2 rounded-full border-2 ${ui.cls}`}>{ui.label}</span>
+        </div>
+
+        {!focusGame && (
+          <div className="flex flex-wrap items-center gap-2 text-left">
+            <span className="text-slate-500 text-xs font-bold uppercase tracking-wider mr-1">{practice ? 'Übe in:' : 'Trainierst du in:'}</span>
+            {gamesForSkill(skill.id).map(id => {
+              const g = GAME_INFO[id];
+              const locked = !!getLockState(id);
+              const isTip = id === practice;
+              const score = gameProgress[id]?.score || 0;
+              return (
+                <button
+                  key={id}
+                  disabled={locked}
+                  onClick={() => onStartGame(id)}
+                  title={locked ? getLockState(id) : `${g.title} starten`}
+                  className={`flex items-center gap-1.5 text-xs md:text-sm font-bold px-3 py-1.5 rounded-full border-2 transition-all ${locked ? 'border-slate-700 bg-slate-900/60 text-slate-600 cursor-not-allowed' : isTip ? 'border-amber-400 bg-amber-500/20 text-amber-100 shadow-[0_0_12px_rgba(251,191,36,0.5)] hover:bg-amber-500/30 active:scale-95' : 'border-emerald-500/50 bg-slate-900/70 text-slate-200 hover:border-amber-300 active:scale-95'}`}
+                >
+                  {locked ? <Lock className="w-3 h-3" /> : <g.icon className="w-4 h-4" />}
+                  {GAME_ORDER.indexOf(id) + 1}. {g.title}
+                  {score > 0 && !locked && <span className="text-yellow-300 flex items-center gap-0.5"><Star className="w-3 h-3 fill-yellow-300" />{score}</span>}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[200] flex items-center justify-center p-4 md:p-6 overflow-y-auto">
+      <div className="bg-slate-900 border-emerald-400 shadow-[0_0_50px_rgba(16,185,129,0.3)] border-4 rounded-3xl max-w-3xl w-full p-6 md:p-8 anim-pop relative flex flex-col max-h-[92vh]">
+        <div className="flex justify-between items-start gap-4 mb-2">
+          <h3 className="text-3xl md:text-4xl font-black text-emerald-300 flex items-center gap-3 drop-shadow-md">
+            <Target className="w-8 h-8 md:w-10 md:h-10 flex-shrink-0 anim-float" /> Das kann ich schon:
+          </h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-full p-2 transition-colors">✕</button>
+        </div>
+        {focusGame ? (
+          <p className="text-slate-300 mb-5">Das trainierst du in der Übung <b className="text-amber-300">„{GAME_INFO[focusGame].title}“</b>:</p>
+        ) : (
+          <p className="text-slate-300 mb-5">Hier siehst du alle Regeln: was du schon gut kannst, was du noch üben kannst – und in welchen Übungen du sie trainierst.</p>
+        )}
+
+        <div className="overflow-y-auto flex-1 pr-2 custom-scrollbar flex flex-col gap-3">
+          {nothingYet && !NOT_COUNTED_NOTE[focusGame] && (
+            <div className="bg-yellow-400/10 border-2 border-yellow-400/40 p-4 rounded-2xl text-center text-yellow-200 font-bold">
+              Spiele ein paar Übungen – dann siehst du hier, was du schon kannst! ✨
+            </div>
+          )}
+          {NOT_COUNTED_NOTE[focusGame] && (
+            <div className="bg-slate-800/80 border-2 border-slate-600 p-3 rounded-2xl text-center text-slate-300 text-sm">
+              {NOT_COUNTED_NOTE[focusGame]}
+            </div>
+          )}
+          {shownSkills.map(s => <SkillRow key={s.id} skill={s} />)}
+        </div>
+
+        <button onClick={onClose} className="mt-5 w-full bg-emerald-600 hover:bg-emerald-500 text-white font-black text-lg py-3 rounded-xl active:scale-95 transition-all">Alles klar!</button>
+      </div>
+    </div>
+  );
+}
+
+// Hinweis für Übungen, die nicht ausgewertet werden
+const NOT_COUNTED_NOTE = {
+
+};
+
+// ==========================================
+// SPEICHERN & LADEN (Zauber-Code)
+// ==========================================
+// Die Reihenfolge von `GAME_ORDER` und `SKILLS` ist Teil des Code-Formats.
+// Neues Format (12 Zeichen, XXXX-XXXX-XXXX): 11 Übungen à 0–10 Sterne + 6 Bausteine à Stufe 0–3,
+// als Zahl in 11 Base-32-Ziffern + 1 Prüfzeichen (erkennt Tippfehler).
+// Altes Format (13 Ziffern, XXXX-XXXX-XXXXX): nur Sterne – wird weiter gelesen (Bausteine dann Stufe 0).
+const CODE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const CODE_MAX = (11n ** 11n) * (4n ** 6n);
+const code32Check = (digits) => CODE32[digits.reduce((acc, v, i) => acc + v * (i + 1), 0) % 31];
+
+const generateSkillCode = (gameProgress, skillLevels) => {
+  let n = 0n;
+  for (const g of GAME_ORDER) n = n * 11n + BigInt(Math.min(10, Math.max(0, gameProgress[g]?.score || 0)));
+  for (const s of SKILLS) n = n * 4n + BigInt(Math.min(3, Math.max(0, skillLevels[s.id] || 0)));
+  const digits = [];
+  for (let i = 0; i < 11; i++) { digits.unshift(Number(n % 32n)); n /= 32n; }
+  const code = digits.map(v => CODE32[v]).join('') + code32Check(digits);
+  return [code.slice(0, 4), code.slice(4, 8), code.slice(8, 12)].join('-');
+};
+
+// Liest einen Code im neuen Format. Ergebnis: { progress, total, skills } oder null
+const parseSkillCode = (input) => {
+  const clean = input.toUpperCase().replace(/O/g, '0').replace(/[IL]/g, '1').replace(/[^0-9A-Z]/g, '');
+  if (clean.length !== 12) return null;
+  if ([...clean].some(ch => !CODE32.includes(ch))) return null;
+  const digits = [...clean.slice(0, 11)].map(ch => CODE32.indexOf(ch));
+  if (clean[11] !== code32Check(digits)) return null;
+  let n = digits.reduce((acc, v) => acc * 32n + BigInt(v), 0n);
+  if (n >= CODE_MAX) return null;
+  const skills = {};
+  [...SKILLS].reverse().forEach(s => { skills[s.id] = Number(n % 4n); n /= 4n; });
+  const progress = {};
+  let total = 0;
+  [...GAME_ORDER].reverse().forEach(g => {
+    const val = Number(n % 11n);
+    n /= 11n;
+    if (val > 0) { progress[g] = { status: 'completed', score: val, max: 10 }; total += val; }
+  });
+  return { progress, total, skills };
+};
+const SKILL_CODE_LENGTH = 12;
+const SKILL_CODE_PLACEHOLDER = 'XXXX-XXXX-XXXX';
+
+// Reihenfolge der Übungen (Teil des Zauber-Codes)
+const GAME_ORDER = ['luecken', 'suchen', 'paare', 'wahrfalsch', 'sortieren', 'raster', 'tippen', 'schriftrolle', 'feder', 'formal', 'gates'];
+
+function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore, skillLog, setSkillLog }) {
   const [inputCode, setInputCode] = useState("");
   const [error, setError] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -916,47 +1150,20 @@ function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore 
 
   const gameOrder = ['luecken', 'suchen', 'paare', 'wahrfalsch', 'sortieren', 'raster', 'tippen', 'schriftrolle', 'feder', 'formal', 'gates'];
 
-  const generateCode = () => {
-    let rawStr = "";
-    let sum = 0;
-    
-    for (let g of gameOrder) {
-      let score = gameProgress[g]?.score || 0;
-      score = Math.min(10, Math.max(0, score)); // clamp 0-10
-      rawStr += score.toString(16); // 0-9, a for 10
-      sum += score;
-    }
-    
-    // Checksum: last digit of sum
-    let checksum = (sum % 16).toString(16);
-    rawStr += checksum;
-    
-    // Map hex string to standard digits to make a 12-digit number code.
-    // 0-9 remain, a->1, b->2, c->3, d->4, e->5, f->6 (just a simple numeric mapping)
-    let numCode = "";
-    for (let char of rawStr) {
-      if (char >= '0' && char <= '9') {
-        numCode += char;
-      } else {
-        // hex a-f to digits 1-6
-        let val = char.charCodeAt(0) - 'a'.charCodeAt(0) + 1;
-        numCode += val.toString();
-      }
-    }
-    
-    // Add random digits to pad it to 13 digits for the format XXXX-XXXX-XXXXX
-    while(numCode.length < 13) {
-       numCode += Math.floor(Math.random() * 10).toString();
-    }
-    numCode = numCode.substring(0, 13);
-    
-    // Format XXXX-XXXX-XXXXX
-    return `${numCode.substring(0,4)}-${numCode.substring(4,8)}-${numCode.substring(8)}`;
-  };
-
   const handleLoad = () => {
+    // Neues Format (mit Stufen und Prüfzeichen)
+    const parsed = parseSkillCode(inputCode);
+    if (parsed) {
+      setGameProgress(parsed.progress);
+      setGlobalScore(parsed.total);
+      setSkillLog(skillLogFromLevels(parsed.skills));
+      setSuccess(true);
+      setTimeout(() => onClose(), 1500);
+      return;
+    }
+    // Altes Format (13 Ziffern, nur Sterne) – „Das kann ich schon“ beginnt dann neu
     let cleanCode = inputCode.replace(/[^0-9]/g, '');
-    if (cleanCode.length !== 13) {
+    if (cleanCode.length !== 13 || /[A-Z]/i.test(inputCode.replace(/[^0-9A-Z]/gi, ''))) {
       triggerError();
       return;
     }
@@ -983,6 +1190,7 @@ function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore 
       }
       setGameProgress(newProgress);
       setGlobalScore(total);
+      setSkillLog({});
       setSuccess(true);
       setTimeout(() => onClose(), 1500);
     } catch (e) {
@@ -1001,7 +1209,7 @@ function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore 
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const currentCode = generateCode();
+  const [currentCode] = useState(() => generateSkillCode(gameProgress, skillLevelsOf(skillLog)));
 
   return (
     <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-md z-[200] flex items-center justify-center p-4">
@@ -1013,7 +1221,7 @@ function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore 
             <Key className="w-8 h-8 text-emerald-400" />
           </div>
           <h3 className="text-2xl font-black text-white text-center">Dein Zauber-Code</h3>
-          <p className="text-slate-400 text-center text-sm mt-2">Schreibe dir diesen Code auf, um später genau hier weiterzuspielen!</p>
+          <p className="text-slate-400 text-center text-sm mt-2">Schreibe dir diesen Code auf. Darin stecken deine Sterne und dein Können!</p>
         </div>
 
         <div className="bg-slate-950 p-4 rounded-xl border-2 border-emerald-500/50 flex justify-between items-center mb-8 shadow-inner group">
@@ -1032,9 +1240,10 @@ function SaveLoadModal({ onClose, gameProgress, setGameProgress, setGlobalScore 
               type="text" 
               value={inputCode}
               onChange={(e) => setInputCode(e.target.value.toUpperCase())}
-              placeholder="XXXX-XXXX-XXXXX"
+              placeholder={SKILL_CODE_PLACEHOLDER}
               className={`w-full bg-slate-950 border-2 rounded-xl p-4 text-white text-center font-mono text-xl focus:outline-none transition-colors ${error ? 'border-red-500 anim-shake' : success ? 'border-lime-500 text-lime-300' : 'border-slate-700 focus:border-emerald-400'}`}
             />
+            {error && <p className="text-red-400 text-center text-sm font-bold">Dieser Code stimmt nicht. Prüfe jedes Zeichen!</p>}
             <button onClick={handleLoad} disabled={!inputCode.trim() || success} className={`w-full font-bold py-4 rounded-xl active:scale-95 transition-all uppercase tracking-wider ${success ? 'bg-lime-600 text-white' : 'bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-50'}`}>
               {success ? "Erfolgreich geladen!" : "Code laden"}
             </button>
@@ -1061,6 +1270,7 @@ function LueckenGame({ onFinish, onShowTip }) {
   const [inputFeedback, setInputFeedback] = useState("");
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { 
     const mappedQuestions = rawLuecken.map(q => ({
@@ -1099,6 +1309,7 @@ function LueckenGame({ onFinish, onShowTip }) {
   const handleChoice = (opt) => {
     if (showSolution) return;
     if (wrongAnswers.includes(opt)) return setShakeTrigger(p => p + 1);
+    if (wrongAnswers.length === 0) track('einsetzen', isAnswerCorrect(opt, currentQ.correctAnswer));
     if (isAnswerCorrect(opt, currentQ.correctAnswer)) {
       setMistakeCount(0); if (wrongAnswers.length === 0) setScore(s => s + 1);
       setSelectedAnswer(opt); setShowSolution(true);
@@ -1107,6 +1318,7 @@ function LueckenGame({ onFinish, onShowTip }) {
 
   const handleInput = () => {
     if (showSolution || !textInput.trim()) return;
+    if (wrongAnswers.length === 0) track('einsetzen', isAnswerCorrect(textInput, currentQ.correctAnswer));
     if (isAnswerCorrect(textInput, currentQ.correctAnswer)) {
       setMistakeCount(0); if (wrongAnswers.length === 0) setScore(s => s + 1);
       setSelectedAnswer(currentQ.correctAnswer); setShowSolution(true); setInputFeedback("");
@@ -1180,6 +1392,7 @@ function FindWordGame({ onFinish, onShowTip }) {
   const [clickedWords, setClickedWords] = useState([]); 
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { setQuestions(shuffleArray(findWordData).slice(0, 10)); }, []);
   if (questions.length === 0) return null;
@@ -1193,6 +1406,7 @@ function FindWordGame({ onFinish, onShowTip }) {
                      (currentQ.target2 && cleanWord === currentQ.target2.toLowerCase()) || 
                      (currentQ.target3 && cleanWord === currentQ.target3.toLowerCase());
 
+    if (clickedWords.length === 0) track('finden', !!isTarget);
     setClickedWords(prev => [...prev, index]);
     if (isTarget) {
       setMistakeCount(0); if (wrongTries === 0) setScore(s => s + 1); setShowSolution(true);
@@ -1260,6 +1474,8 @@ function MatchingGame({ onFinish, onShowTip }) {
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
+  const track = useTrack();
+  const triedRef = useRef(new Set()); // erster Versuch je Nomen
 
   useEffect(() => {
     // Erstelle 2 Runden mit je 5 Paaren, dabei wird strikt gefiltert, 
@@ -1290,9 +1506,10 @@ function MatchingGame({ onFinish, onShowTip }) {
 
   const setupRound = (pairs) => {
     const withIds = pairs.map((p, i) => ({ ...p, id: i }));
+    triedRef.current = new Set();
     setLeftItems(shuffleArray(withIds.map(p => ({ id: p.id, text: p.left }))));
     setRightItems(shuffleArray(withIds.map(p => ({ id: p.id, text: p.right }))));
-    setMatchedIds([]); setSelectedLeft(null); setSelectedRight(null); setIsProcessing(false);
+    setMatchedIds([]); setFailedPairs([]); setSelectedLeft(null); setSelectedRight(null); setIsProcessing(false);
   };
 
   const handleSelection = (side, item) => {
@@ -1304,6 +1521,7 @@ function MatchingGame({ onFinish, onShowTip }) {
   useEffect(() => {
     if (selectedLeft && selectedRight && !isProcessing) {
       setIsProcessing(true);
+      if (!triedRef.current.has(selectedLeft.id)) { triedRef.current.add(selectedLeft.id); track('ersetzen', selectedLeft.id === selectedRight.id); }
       if (selectedLeft.id === selectedRight.id) {
         setMistakeCount(0); 
         setMatchedIds(prev => [...prev, selectedLeft.id]);
@@ -1318,7 +1536,8 @@ function MatchingGame({ onFinish, onShowTip }) {
         const newCount = mistakeCount + 1; setMistakeCount(newCount);
         if (newCount >= 3) { onShowTip("Tipp: Männlich (der), weiblich (die), sächlich (das) oder Mehrzahl? Achte genau darauf, um das Paar zu finden."); setMistakeCount(0); }
         
-        setFailedPairs(prev => [...prev, selectedLeft.id, selectedRight.id]);
+        // Nur das angeklickte Nomen verliert seinen Punkt (1 Fehler = 1 Stern weniger)
+        setFailedPairs(prev => [...prev, selectedLeft.id]);
         
         setTimeout(() => { setSelectedLeft(null); setSelectedRight(null); setIsProcessing(false); }, 600);
       }
@@ -1397,6 +1616,7 @@ function TrueFalseGame({ onFinish, onShowTip }) {
   
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { setQuestions(shuffleArray(trueFalseData).slice(0, 10)); }, []);
   if (questions.length === 0) return null;
@@ -1405,6 +1625,7 @@ function TrueFalseGame({ onFinish, onShowTip }) {
   const handleAnswer = (userGuess) => {
     if (phase !== 'evaluate') return;
     if (wrongGuesses.includes(userGuess)) return setShakeTrigger(p=>p+1);
+    if (wrongGuesses.length === 0 && (userGuess !== currentQ.isCorrect || currentQ.isCorrect)) track('einsetzen', userGuess === currentQ.isCorrect);
     
     if (userGuess === currentQ.isCorrect) {
       setMistakeCount(0);
@@ -1427,6 +1648,7 @@ function TrueFalseGame({ onFinish, onShowTip }) {
   const handleRepair = (option) => {
     if (phase !== 'repair') return;
     if (wrongRepairGuesses.includes(option)) return setShakeTrigger(p=>p+1);
+    if (wrongGuesses.length === 0 && wrongRepairGuesses.length === 0) track('einsetzen', option === currentQ.correctTarget);
 
     if (option === currentQ.correctTarget) {
       if (wrongGuesses.length === 0 && wrongRepairGuesses.length === 0) setScore(s => s + 1);
@@ -1515,6 +1737,7 @@ function SortingGame({ onFinish, onShowTip }) {
   const [wrongGuesses, setWrongGuesses] = useState([]);
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { setWords(shuffleArray(sortingWords).slice(0, 10)); }, []);
   if (words.length === 0) return null;
@@ -1522,6 +1745,7 @@ function SortingGame({ onFinish, onShowTip }) {
 
   const handleSort = (category) => {
     if (showSolution || wrongGuesses.includes(category)) return setShakeTrigger(p=>p+1);
+    if (wrongGuesses.length === 0) track('art', category === currentQ.category);
     
     if (category === currentQ.category) {
       setMistakeCount(0); if (wrongGuesses.length === 0) setScore(s => s + 1); setShowSolution(true);
@@ -1590,6 +1814,7 @@ function GridGame({ onFinish, onShowTip }) {
   const [wrongCell, setWrongCell] = useState(null);
   const [shakeTrigger, setShakeTrigger] = useState(0);
   const [isSelected, setIsSelected] = useState(false);
+  const track = useTrack();
 
   useEffect(() => { setWords(shuffleArray(gridData).slice(0, 10)); }, []);
   if (words.length === 0) return null;
@@ -1598,6 +1823,7 @@ function GridGame({ onFinish, onShowTip }) {
   const handleCellClick = (row, col) => {
     if (showSolution || !isSelected) return;
     setIsSelected(false); // Reset Selection after attempt
+    if (mistakesInRound === 0) track('person', row === currentQ.row && col === currentQ.col);
     
     if (row === currentQ.row && col === currentQ.col) {
       if (mistakesInRound === 0) setScore(s => s + 1); 
@@ -1706,6 +1932,7 @@ function TypingGame({ onFinish, onShowTip }) {
   const [mistakesMade, setMistakesMade] = useState(0); 
   const [mistakeCount, setMistakeCount] = useState(0); 
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { setQuestions(shuffleArray(typingData).slice(0, 10)); }, []);
   if (questions.length === 0) return null;
@@ -1715,6 +1942,7 @@ function TypingGame({ onFinish, onShowTip }) {
     if (showSolution || !textInput.trim()) return;
     const inputClean = textInput.trim();
     const correctClean = currentQ.correct.trim();
+    if (mistakesMade === 0) track('ersetzen', inputClean === correctClean);
     
     if (inputClean === correctClean) {
       setMistakeCount(0); if (mistakesMade === 0) setScore(s => s + 1);
@@ -1802,6 +2030,7 @@ function ScrollGame({ onFinish, onShowTip }) {
   const [mistakesMade, setMistakesMade] = useState(0);
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { setQuestions(shuffleArray(scrollData).slice(0, 5).map(q => ({...q, shuffledBank: shuffleArray(q.bank)}))); }, []);
   useEffect(() => {
@@ -1817,6 +2046,7 @@ function ScrollGame({ onFinish, onShowTip }) {
 
   const checkAnswers = () => {
     const allCorrect = currentQ.answers.every((ans, i) => activeBlanks[i] === ans);
+    if (mistakesMade === 0) currentQ.answers.forEach((ans, i) => track('einsetzen', activeBlanks[i] === ans));
     if (allCorrect) {
       setMistakeCount(0); 
       if (mistakesMade === 0) setScore(s => s + 2); // 5 Rollen x 2 = 10 Punkte
@@ -1891,6 +2121,7 @@ function StoryTypingGame({ onFinish, onShowTip }) {
   const [validation, setValidation] = useState([]); 
   const [showSolution, setShowSolution] = useState(false);
   const [mistakesMade, setMistakesMade] = useState(0);
+  const track = useTrack();
 
   useEffect(() => {
     if (globalStoryTypingQueue.length === 0) {
@@ -1931,6 +2162,7 @@ function StoryTypingGame({ onFinish, onShowTip }) {
     });
 
     setValidation(newValidation);
+    if (mistakesMade === 0) newValidation.forEach(v => track('einsetzen', v === 'correct'));
 
     if (allCorrect) {
       let earnedScore = 10;
@@ -2003,6 +2235,7 @@ function FormalGame({ onFinish, onShowTip }) {
   const [mistakeCount, setMistakeCount] = useState(0);
   const [shakeTrigger, setShakeTrigger] = useState(0);
   const [didEnlarge, setDidEnlarge] = useState(false);
+  const track = useTrack();
 
   useEffect(() => { setQuestions(shuffleArray(formalContextData).slice(0, 10)); }, []);
   if (questions.length === 0) return null;
@@ -2011,6 +2244,7 @@ function FormalGame({ onFinish, onShowTip }) {
   const handleAction = (wantsEnlarge) => {
     if (showSolution) return;
     if (wrongGuesses.includes(wantsEnlarge)) return setShakeTrigger(p=>p+1);
+    if (wrongGuesses.length === 0) track('hoeflich', wantsEnlarge === currentQ.isFormal);
     
     if (wantsEnlarge === currentQ.isFormal) {
       setMistakeCount(0); if (wrongGuesses.length === 0) setScore(s => s + 1); 
@@ -2081,6 +2315,7 @@ function GateGame({ onFinish }) {
   const [gamePhase, setGamePhase] = useState('intro'); 
   const [gateAnim, setGateAnim] = useState(null); 
   const [shakeTrigger, setShakeTrigger] = useState(0);
+  const track = useTrack();
 
   useEffect(() => { setWords(shuffleArray(gateData).slice(0, 20)); }, []);
 
@@ -2116,6 +2351,7 @@ function GateGame({ onFinish }) {
     setGamePhase('paused');
     
     const isCorrect = category === words[currentIndex].category;
+    track('hoeflich', isCorrect);
     let newScore = score;
     
     if (isCorrect) {
@@ -2313,6 +2549,19 @@ export default function App() {
   const [gameProgress, setGameProgress] = useState({});
   const [hudAnim, setHudAnim] = useState(false);
 
+  // „Das kann ich schon“: pro Baustein window = letzte bis zu 10 Ergebnisse (inkl. Startwerte aus dem Code),
+  // ok/total = echte Zählung in dieser Sitzung
+  const [skillLog, setSkillLog] = useState({});
+  const [skillModal, setSkillModal] = useState(null); // null oder { focus: gameId | null }
+  const track = useCallback((skillId, correct) => {
+    if (!skillId) return;
+    setSkillLog(prev => {
+      const en = prev[skillId] || { window: [], ok: 0, total: 0 };
+      return { ...prev, [skillId]: { window: [...en.window, !!correct].slice(-10), ok: en.ok + (correct ? 1 : 0), total: en.total + 1 } };
+    });
+  }, []);
+  const skillContext = useMemo(() => ({ track }), [track]);
+
   // Skill-Tree Logik
   const getLockState = (gameMode) => {
     switch(gameMode) {
@@ -2386,11 +2635,12 @@ export default function App() {
       
       {showRulesModal && <RulesModal onClose={() => setShowRulesModal(false)} />}
       {showHelpModal && <HelpModal onClose={() => setShowHelpModal(false)} />}
-      {showSaveModal && <SaveLoadModal onClose={() => setShowSaveModal(false)} gameProgress={gameProgress} setGameProgress={setGameProgress} setGlobalScore={setGlobalScore} />}
+      {showSaveModal && <SaveLoadModal onClose={() => setShowSaveModal(false)} gameProgress={gameProgress} setGameProgress={setGameProgress} setGlobalScore={setGlobalScore} skillLog={skillLog} setSkillLog={setSkillLog} />}
+      {skillModal && <SkillModal onClose={() => setSkillModal(null)} skillLog={skillLog} focusGame={skillModal.focus} getLockState={getLockState} gameProgress={gameProgress} onStartGame={(id) => { setSkillModal(null); startGame(id); }} />}
       
       {showAdminAuth && <AdminAuthModal onClose={() => setShowAdminAuth(false)} onLogin={() => { setShowAdminAuth(false); setShowAdminControl(true); }} onImpressum={() => { setShowAdminAuth(false); setImpressum('impressum'); }} />}
       {impressum && <ImpressumModal section={impressum} onClose={() => setImpressum(null)} />}
-      {showAdminControl && <AdminControlModal onClose={() => setShowAdminControl(false)} setGameProgress={setGameProgress} setGlobalScore={setGlobalScore} />}
+      {showAdminControl && <AdminControlModal onClose={() => setShowAdminControl(false)} setGameProgress={setGameProgress} setGlobalScore={setGlobalScore} setSkillLog={setSkillLog} />}
 
       {/* GLOBAL HEADER (ZAUBER-REGELN, HILFE & HUD) */}
       <div className="fixed top-4 left-4 right-4 md:top-6 md:left-6 md:right-6 z-[150] flex justify-between items-start pointer-events-none">
@@ -2422,6 +2672,14 @@ export default function App() {
           >
             <Key className="w-5 h-5 md:w-6 md:h-6" />
             <span className="hidden md:inline text-sm md:text-base uppercase tracking-wider">Zauber-Code</span>
+          </button>
+
+          <button 
+            onClick={() => setSkillModal({ focus: null })} 
+            className="flex items-center gap-2 md:gap-3 bg-slate-900/90 backdrop-blur-md hover:bg-lime-500 border-2 border-lime-500/50 text-lime-300 hover:text-lime-950 font-bold py-2 md:py-3 px-3 md:px-6 rounded-full transition-all active:scale-95 shadow-[0_0_20px_rgba(132,204,22,0.2)]"
+          >
+            <Target className="w-5 h-5 md:w-6 md:h-6" />
+            <span className="hidden lg:inline text-sm md:text-base uppercase tracking-wider">Das kann ich schon:</span>
           </button>
 
           <button onClick={() => setShowAdminAuth(true)} className="opacity-30 hover:opacity-100 transition-opacity p-2">
@@ -2542,6 +2800,7 @@ export default function App() {
               Du hast <strong className="text-white drop-shadow-md">{finalScore}</strong> von <strong className="text-white drop-shadow-md">{maxScore}</strong> magischen Sternen für dieses Spiel gesammelt!
             </p>
             <div className="flex flex-col gap-4">
+              <button onClick={() => setSkillModal({ focus: activeGame })} className="flex items-center justify-center gap-3 bg-slate-800 hover:bg-slate-700 border-2 border-lime-500/60 text-lime-300 font-bold text-lg py-4 px-6 rounded-xl uppercase tracking-wider active:scale-95"><Target className="w-6 h-6" /> Das kann ich schon:</button>
               <button onClick={() => setGameState('playing')} className="flex items-center justify-center gap-3 bg-amber-500 hover:bg-amber-400 text-amber-950 font-bold text-lg py-4 px-6 rounded-xl uppercase tracking-wider active:scale-95">
                 <RotateCcw className="w-6 h-6" /> Noch einmal versuchen
               </button>
@@ -2577,11 +2836,14 @@ export default function App() {
                 {activeGame === 'formal' && 'Der Höflichkeits-Zauber'}
                 {activeGame === 'gates' && 'Die Schlosstore'}
               </div>
-              <div className="flex justify-end"></div>
+              <div className="flex justify-end">
+                <button onClick={() => setSkillModal({ focus: activeGame })} title="Das kann ich schon:" className="flex items-center gap-1 bg-slate-800/60 hover:bg-slate-700 text-lime-300 font-bold px-3 py-2 rounded-xl border border-lime-500/40 active:scale-95"><Target className="w-5 h-5" /><span className="hidden md:inline text-sm">Das kann ich schon:</span></button>
+              </div>
             </div>
 
             <div className="bg-black/20 backdrop-blur-sm w-full rounded-3xl shadow-2xl border border-white/10 p-6 md:p-10 relative overflow-hidden min-h-[400px]">
               <div className="relative z-10">
+                <SkillContext.Provider value={skillContext}>
                 {activeGame === 'luecken' && <LueckenGame onFinish={handleFinish} onShowTip={setTipMessage} />}
                 {activeGame === 'suchen' && <FindWordGame onFinish={handleFinish} onShowTip={setTipMessage} />}
                 {activeGame === 'paare' && <MatchingGame onFinish={handleFinish} onShowTip={setTipMessage} />}
@@ -2593,6 +2855,7 @@ export default function App() {
                 {activeGame === 'feder' && <StoryTypingGame onFinish={handleFinish} onShowTip={setTipMessage} />}
                 {activeGame === 'formal' && <FormalGame onFinish={handleFinish} onShowTip={setTipMessage} />}
                 {activeGame === 'gates' && <GateGame onFinish={handleFinish} onShowTip={setTipMessage} />}
+                </SkillContext.Provider>
               </div>
             </div>
           </div>
